@@ -1622,6 +1622,442 @@ class PrintJobsPage(QWidget):
         dlg.resize(600, 500)
         dlg.exec_()
 
+    
+    def _on_calculate_job(self):
+        """Calculate job cost and show a human-friendly summary."""
+        if not self.current_products:
+            self.job_result_label.setText(
+                "No products in the database. Run the Excel import or add a product first."
+            )
+            return
+    
+        # Product / variant selection
+        idx = self.product_combo.currentIndex()
+        product_id = self.product_combo.itemData(idx)
+        if product_id is None:
+            self.job_result_label.setText("Please select a product.")
+            return
+    
+        product_name = self.product_combo.currentText()
+    
+        v_idx = self.variant_combo.currentIndex()
+        variant_id = self.variant_combo.itemData(v_idx)
+        variant_name = ""
+        if variant_id is not None:
+            variant_name = self.variant_combo.currentText()
+    
+        # Quantity
+        qty = int(self.quantity_spin.value())
+        if qty <= 0:
+            self.job_result_label.setText("Quantity must be at least 1.")
+            return
+    
+        # Material cost per unit
+        material_cost_per_unit = self.material_cost_spin.value()
+        if material_cost_per_unit < 0:
+            material_cost_per_unit = 0.0
+    
+        # Run cost model
+        costs = self._calculate_job_cost(
+            qty=qty,
+            material_cost_per_unit=material_cost_per_unit,
+            labor_hours_per_unit=self.labor_hours_spin.value(),
+            labor_rate_per_hour=self.labor_rate_spin.value(),
+            machine_hours_per_unit=self.print_time_hours_spin.value(),
+            machine_power_watts=self.machine_power_spin.value(),
+            electricity_rate_per_kwh=self.electric_rate_spin.value(),
+            wear_tear_per_unit=self.wear_tear_spin.value(),
+            extra_overhead_per_job=self.extra_overhead_spin.value(),
+            margin_percent=self.margin_spin.value(),
+        )
+    
+        self.last_costs = costs
+        # Store everything we’ll want when saving an invoice
+        self.last_job_info = {
+            "job_name": self.job_name_edit.text().strip(),
+            "customer_name": self.customer_name_edit.text().strip(),
+            "customer_email": self.customer_email_edit.text().strip(),
+            "product_id": product_id,
+            "product_name": product_name,
+            "variant_id": variant_id,
+            "variant_name": variant_name,
+            "quantity": qty,
+            "material_cost_per_unit": material_cost_per_unit,
+            "margin_percent": self.margin_spin.value(),
+            "notes": self.notes_edit.toPlainText().strip(),
+            "recommendation": self.recommendation_edit.toPlainText().strip(),
+        }
+    
+        # Human-friendly HTML summary
+        html = (
+            f"<b>Job summary</b><br>"
+            f"Product: {product_name}"
+        )
+        if variant_name:
+            html += f" — {variant_name}"
+        html += "<br>"
+        html += f"Quantity: {qty:d}<br><br>"
+    
+        html += (
+            f"<b>Material total:</b> ${costs['material_total']:.2f}<br>"
+            f"<b>Labor total:</b> ${costs['labor_total']:.2f}<br>"
+            f"<b>Electricity total:</b> ${costs['electricity_total']:.2f}<br>"
+            f"<b>Wear &amp; tear:</b> ${costs['wear_total']:.2f}<br>"
+            f"<b>Extra overhead (job):</b> ${costs['extra_overhead_per_job']:.2f}<br>"
+            f"<b>Overhead total:</b> ${costs['overhead_total']:.2f}<br><br>"
+            f"<b>Cost per unit before margin:</b> ${costs['cost_per_unit_before_margin']:.2f}<br>"
+            f"<b>Recommended price per unit:</b> ${costs['price_per_unit']:.2f}<br>"
+            f"<b>Recommended total price:</b> ${costs['price_total']:.2f}"
+        )
+    
+        self.job_result_label.setText(html)
+    
+    def _show_invoice(self, internal: bool):
+        """Show either an internal or customer invoice dialog, with option to save."""
+        if not self.last_costs or not self.last_job_info:
+            QMessageBox.information(
+                self,
+                "No job calculated",
+                "Calculate a job first, then generate an invoice.",
+            )
+            return
+    
+        job_info = self.last_job_info
+        costs = self.last_costs
+    
+        # Build both versions so we can store both in the DB
+        internal_text = self._build_invoice_text(job_info, costs, internal=True)
+        customer_text = self._build_invoice_text(job_info, costs, internal=False)
+    
+        text_to_show = internal_text if internal else customer_text
+    
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Internal Invoice" if internal else "Customer Invoice")
+        layout = QVBoxLayout(dlg)
+    
+        edit = QPlainTextEdit()
+        edit.setPlainText(text_to_show)
+        layout.addWidget(edit)
+    
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        save_button = QPushButton("Save to Invoices")
+        buttons.addButton(save_button, QDialogButtonBox.ActionRole)
+        layout.addWidget(buttons)
+    
+        def on_save():
+            try:
+                invoice_id = db.create_invoice(
+                    job_name=job_info.get("job_name") or "",
+                    customer_name=job_info.get("customer_name") or "",
+                    customer_email=job_info.get("customer_email") or "",
+                    product_id=job_info.get("product_id"),
+                    variant_id=job_info.get("variant_id"),
+                    quantity=costs.get("qty", 0),
+                    material_cost_per_unit=job_info.get("material_cost_per_unit"),
+                    labor_cost_total=costs.get("labor_total", 0),
+                    electricity_cost_total=costs.get("electricity_total", 0),
+                    wear_and_tear_total=costs.get("wear_total", 0),
+                    extra_overhead_total=costs.get("extra_overhead_per_job", 0),
+                    overhead_total=costs.get("overhead_total", 0),
+                    margin_percent=job_info.get("margin_percent"),
+                    price_per_unit=costs.get("price_per_unit", 0),
+                    total_price=costs.get("price_total", 0),
+                    notes=job_info.get("notes") or "",
+                    internal_invoice=internal_text,
+                    customer_invoice=customer_text,
+                )
+                QMessageBox.information(
+                    self,
+                    "Invoice saved",
+                    f"Invoice #{invoice_id} has been saved to the database.",
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Could not save invoice:\n{e}",
+                )
+    
+        save_button.clicked.connect(on_save)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+    
+        dlg.resize(600, 500)
+        dlg.exec_()
+    
+
+class InvoicesPage(QWidget):
+    """View and manage saved invoices/jobs."""
+
+    def __init__(self):
+        super().__init__()
+
+        self.rows = []
+
+        main_layout = QVBoxLayout(self)
+
+        # Header + buttons row
+        header_layout = QHBoxLayout()
+        title = QLabel("Invoices")
+        title.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+
+        self.refresh_button = QPushButton("Refresh")
+        self.view_button = QPushButton("View")
+        self.delete_button = QPushButton("Delete")
+
+        header_layout.addWidget(self.refresh_button)
+        header_layout.addWidget(self.view_button)
+        header_layout.addWidget(self.delete_button)
+
+        main_layout.addLayout(header_layout)
+
+        # Table
+        self.table = QTableWidget(0, 9)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "ID",
+                "Date",
+                "Job",
+                "Customer",
+                "Product",
+                "Variant",
+                "Qty",
+                "Price/unit",
+                "Total",
+            ]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+
+        main_layout.addWidget(self.table)
+
+        # Connections
+        self.refresh_button.clicked.connect(self.refresh_table)
+        self.view_button.clicked.connect(self.view_selected_invoice)
+        self.delete_button.clicked.connect(self.delete_selected_invoice)
+        self.table.cellDoubleClicked.connect(lambda *_: self.view_selected_invoice())
+
+        # Initial data load
+        self.refresh_table()
+
+    # --------------------------------------------------
+    # Data loading
+    # --------------------------------------------------
+    def refresh_table(self):
+        """Reload invoices from the database into the table."""
+        try:
+            self.rows = db.get_all_invoices()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Could not load invoices:\n{e}",
+            )
+            self.rows = []
+            self.table.setRowCount(0)
+            return
+
+        self.table.setRowCount(len(self.rows))
+
+        for row_idx, row in enumerate(self.rows):
+            def get(name, default=None):
+                try:
+                    value = row[name]
+                except Exception:
+                    return default
+                if value is None:
+                    return default
+                return value
+
+            invoice_id = get("id", "")
+            created_at = get("created_at", "") or ""
+            job_name = get("job_name", "") or ""
+            customer_name = get("customer_name", "") or ""
+            product_name = get("product_name", "") or ""
+            variant_color = get("variant_color", "") or ""
+            qty = get("quantity", 0.0)
+            price_per_unit = get("price_per_unit", 0.0)
+            total_price = get("total_price", 0.0)
+
+            # Format values nicely
+            date_str = created_at.split("T")[0] if isinstance(created_at, str) and "T" in created_at else str(created_at)
+            try:
+                qty_str = f"{float(qty):.2f}"
+            except Exception:
+                qty_str = str(qty)
+
+            try:
+                ppu_str = f"${float(price_per_unit):.2f}"
+            except Exception:
+                ppu_str = str(price_per_unit)
+
+            try:
+                total_str = f"${float(total_price):.2f}"
+            except Exception:
+                total_str = str(total_price)
+
+            values = [
+                str(invoice_id),
+                date_str,
+                job_name,
+                customer_name,
+                product_name,
+                variant_color,
+                qty_str,
+                ppu_str,
+                total_str,
+            ]
+
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                self.table.setItem(row_idx, col, item)
+
+        self.table.resizeColumnsToContents()
+
+    # For MainWindow's generic refresh hooks
+    def refresh_data(self):
+        self.refresh_table()
+
+    # --------------------------------------------------
+    # Helpers and actions
+    # --------------------------------------------------
+    def _get_selected_row(self):
+        """Return the sqlite3.Row for the currently selected invoice, or None."""
+        selection = self.table.selectionModel().selectedRows()
+        if not selection:
+            return None
+        row_idx = selection[0].row()
+        if 0 <= row_idx < len(self.rows):
+            return self.rows[row_idx]
+        return None
+
+    def view_selected_invoice(self):
+        """Open a dialog showing the selected invoice's internal & customer texts."""
+        row = self._get_selected_row()
+        if row is None:
+            QMessageBox.information(
+                self,
+                "No selection",
+                "Please select an invoice first.",
+            )
+            return
+
+        invoice_id = row["id"]
+
+        try:
+            full = db.get_invoice(invoice_id)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Could not load invoice:\n{e}",
+            )
+            return
+
+        if not full:
+            QMessageBox.warning(
+                self,
+                "Not found",
+                "That invoice no longer exists.",
+            )
+            self.refresh_table()
+            return
+
+        job_name = full["job_name"] or ""
+        customer_name = full["customer_name"] or ""
+        created_at = full["created_at"] or ""
+        total_price = full["total_price"] or 0.0
+
+        internal_text = full["internal_invoice"] or ""
+        customer_text = full["customer_invoice"] or ""
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Invoice #{full['id']}")
+
+        layout = QVBoxLayout(dlg)
+
+        try:
+            total_str = f"${float(total_price):.2f}"
+        except Exception:
+            total_str = str(total_price)
+
+        summary = QLabel(
+            f"<b>{job_name or 'Invoice'}</b><br>"
+            f"Customer: {customer_name}<br>"
+            f"Date: {created_at}<br>"
+            f"Total: {total_str}"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        tabs = QTabWidget()
+
+        internal_widget = QWidget()
+        internal_layout = QVBoxLayout(internal_widget)
+        internal_edit = QPlainTextEdit()
+        internal_edit.setPlainText(internal_text)
+        internal_layout.addWidget(internal_edit)
+        tabs.addTab(internal_widget, "Internal")
+
+        customer_widget = QWidget()
+        customer_layout = QVBoxLayout(customer_widget)
+        customer_edit = QPlainTextEdit()
+        customer_edit.setPlainText(customer_text)
+        customer_layout.addWidget(customer_edit)
+        tabs.addTab(customer_widget, "Customer")
+
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        dlg.resize(700, 500)
+        dlg.exec_()
+
+    def delete_selected_invoice(self):
+        """Delete the selected invoice after confirmation."""
+        row = self._get_selected_row()
+        if row is None:
+            QMessageBox.information(
+                self,
+                "No selection",
+                "Please select an invoice to delete.",
+            )
+            return
+
+        invoice_id = row["id"]
+
+        reply = QMessageBox.question(
+            self,
+            "Delete invoice",
+            f"Delete invoice #{invoice_id}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            db.delete_invoice(invoice_id)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Could not delete invoice:\n{e}",
+            )
+            return
+
+        self.refresh_table()
+
+
 class AnalyticsPage(QWidget):
     def __init__(self):
         super().__init__()

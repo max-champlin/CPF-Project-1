@@ -15,6 +15,7 @@ from ui_pages import (
     PartsPage,
     ProductsPage,
     PrintJobsPage,
+    InvoicesPage,
     AnalyticsPage,
     CreditsPage,
 )
@@ -43,6 +44,7 @@ class MainWindow(QWidget):
                 "Parts",
                 "Products",
                 "Print Jobs",
+                "Invoices",
                 "Analytics",
                 "Credits",
             ]
@@ -57,6 +59,7 @@ class MainWindow(QWidget):
         self.parts_page = PartsPage()
         self.products_page = ProductsPage()
         self.print_jobs_page = PrintJobsPage()
+        self.invoices_page = InvoicesPage()
         self.analytics_page = AnalyticsPage()
         self.credits_page = CreditsPage()
 
@@ -65,6 +68,7 @@ class MainWindow(QWidget):
         self.pages.addWidget(self.parts_page)
         self.pages.addWidget(self.products_page)
         self.pages.addWidget(self.print_jobs_page)
+        self.pages.addWidget(self.invoices_page)
         self.pages.addWidget(self.analytics_page)
         self.pages.addWidget(self.credits_page)
 
